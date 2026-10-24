@@ -16,7 +16,7 @@ export async function generateListing(payload: { imageBase64: string; mimeType: 
     throw new Error('Gemini is not configured. Set GEMINI_API_KEY in PowerShell, then restart the app. Get a key at https://aistudio.google.com/');
   }
 
-  const model = process.env.GEMINI_VISION_MODEL || 'gemini-2.5-flash';
+  const model = process.env.GEMINI_VISION_MODEL || 'gemini-3.8-flash';
   const prompt = `You create accurate Etsy digital-download listing drafts. Analyze the supplied main product image. Never invent dimensions, licensing rights, included files, editable features, printing details, or guarantees. Generate an appealing but accurate title (max 140 characters), useful buyer-focused description, exactly 30 distinct keyword/tag candidates each max 20 characters, and exactly 13 best tags each max 20 characters. Etsy supports only 13 tags. Avoid repeated tags and irrelevant keywords. Return only valid JSON with keys: title, description, keywordCandidates, selectedTags, suggestedCategory, altText.\n\nOptional product name: ${payload.productName || 'not provided'}. Seller notes: ${payload.notes || 'none'}. This is the main product PNG. Ensure exactly 30 candidates and 13 selected tags.`;
 
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
