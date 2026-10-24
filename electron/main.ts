@@ -90,39 +90,58 @@ function registerIpc() {
 }
 
 async function scanFolder(folderPath: string) {
-  const stat = await fs.stat(folderPath); if (!stat.isDirectory()) throw new Error('Select a folder, not a file.');
-  const names = await fs.readdir(folderPath, { withFileTypes: true });
-  const files = [] as Array<{name:string; path:string; size:number; mimeType:string; kind:string; previewUrl:string}>;
-  for (const entry of names) {
-    if (!entry.isFile()) continue;
-    const fullPath = path.join(folderPath, entry.name); const ext = path.extname(entry.name).toLowerCase();
-    if (!['.png','.jpg','.jpeg','.webp','.gif','.pdf','.zip','.svg'].includes(ext)) continue;
-    const info = await fs.stat(fullPath); const mimeType = mimeFromPath(fullPath);
-    const isImage = ['.png','.jpg','.jpeg','.webp','.gif'].includes(ext);
-    const previewUrl = isImage && info.size <= 5 * 1024 * 1024 ? `data:${mimeType};base64,${(await fs.readFile(fullPath)).toString('base64')}` : '';
-    files.push({ name: entry.name, path: fullPath, size: info.size, mimeType, kind: isImage ? 'image' : 'download', previewUrl });
+  const stat = await fs.stat(folderPath);
+  if (!stat.isDirectory()) throw new Error('Select a folder, not a file.');
+  const supported = new Set(['.png','.jpg','.jpeg','.webp','.gif','.pdf','.zip','.svg']);
+  const files: Array<{name:string; path:string; size:number; mimeType:string; kind:string; previewUrl:string; relativePath?:string}> = [];
+  async function walk(dir: string) {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      // Skip hidden/system folders and dependency/build folders.
+      if (entry.name.startsWith('.') || ['node_modules','dist','release','__MACOSX'].includes(entry.name)) continue;
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) { await walk(fullPath); continue; }
+      if (!entry.isFile()) continue;
+      const ext = path.extname(entry.name).toLowerCase();
+      if (!supported.has(ext)) continue;
+      const info = await fs.stat(fullPath);
+      const mimeType = mimeFromPath(fullPath);
+      const isImage = ['.png','.jpg','.jpeg','.webp','.gif'].includes(ext);
+      const previewUrl = isImage && info.size <= 5 * 1024 * 1024 ? `data:${mimeType};base64,${(await fs.readFile(fullPath)).toString('base64')}` : '';
+      files.push({ name: entry.name, path: fullPath, size: info.size, mimeType, kind: isImage ? 'image' : 'download', previewUrl, relativePath: path.relative(folderPath, fullPath) });
+    }
   }
-  files.sort((a,b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  const imageFiles = files.filter(f => f.kind === 'image');
-  const preferredNames = /^(master|main|design|artwork|original|print|printable|final)([-_ ]?\d+)?\.(png|jpg|jpeg|webp)$/i;
-  const main = imageFiles.find(f => preferredNames.test(f.name))
-    || imageFiles.filter(f => /\.png$/i.test(f.name)).sort((a,b) => {
-      const score = (f: typeof a) => (/(master|main|design|artwork|original|print|printable|final)/i.test(f.name) ? 100 : 0) + (f.previewUrl ? 10 : 0) - Math.min(f.size / (1024 * 1024), 20);
-      return score(b) - score(a);
-    })[0]
-    || imageFiles[0];
+  await walk(folderPath);
+  files.sort((a,b) => a.path.localeCompare(b.path, undefined, { numeric: true }));
   const images = files.filter(f => f.kind === 'image');
+  // Strongly prefer explicitly named PNG artwork; otherwise choose the largest PNG
+  // as a practical default. The user can always override the suggestion in review.
+  const pngs = images.filter(f => /\.png$/i.test(f.name));
+  const preferred = /^(master|main|design|artwork|original|print|printable|final)([-_ ]?\d+)?\.png$/i;
+  const main = pngs.find(f => preferred.test(f.name))
+    || pngs.sort((a,b) => b.size - a.size)[0]
+    || images.find(f => /(^|[/\\])(mockups?|listing images?)([/\\])/i.test(f.path.replace(folderPath,'')))
+    || images[0];
   const mockups = images.filter(f => f.path !== main?.path);
-  const downloadFile = main;
+  // A listing image is not automatically the buyer's digital download. Only
+  // offer non-image delivery files as automatic candidates.
+  const downloadCandidates = files.filter(f => f.kind === 'download' && ['.zip','.pdf'].includes(path.extname(f.name).toLowerCase()));
+  const downloadFile = downloadCandidates.find(f => /download|digital|printable|deliver|bundle|files/i.test(f.name)) || (downloadCandidates.length === 1 ? downloadCandidates[0] : null);
   const fingerprintHash = crypto.createHash('sha256');
   for (const file of files) {
-    fingerprintHash.update(file.name);
+    fingerprintHash.update(file.path.replace(folderPath,''));
     fingerprintHash.update(':');
     fingerprintHash.update(await hashFile(file.path));
     fingerprintHash.update('|');
   }
   const fingerprint = fingerprintHash.digest('hex');
-  return { folderPath, folderName: path.basename(folderPath), files, mainImage: main || null, mockups, downloadFile: downloadFile || null, fingerprint, warnings: [!main ? 'No PNG or image found. Choose a main image manually.' : '', mockups.length > 20 ? `Found ${mockups.length} mockups. Etsy supports up to 20 listing images; only the first 20 will be used.` : '', !downloadFile ? 'No digital download file found.' : '', downloadFile && downloadFile.size > 20*1024*1024 ? 'The main file exceeds Etsy’s 20 MB per-file limit for instant downloads.' : ''].filter(Boolean) };
+  const warnings = [
+    !main ? 'No PNG or image found. Choose a master image manually.' : (!preferred.test(main.name) ? 'Master PNG is an automatic suggestion. Review the preview and confirm or change it.' : ''),
+    mockups.length > 20 ? `Found ${mockups.length} additional images. Etsy supports up to 20 listing images; only the first 20 will be used.` : '',
+    !downloadFile ? 'No clear PDF/ZIP digital download was identified. Confirm the buyer download separately before creating a draft.' : '',
+    downloadFile && downloadFile.size > 20*1024*1024 ? 'The selected download exceeds Etsy’s 20 MB per-file limit for instant downloads.' : ''
+  ].filter(Boolean);
+  return { folderPath, folderName: path.basename(folderPath), files, mainImage: main || null, mockups, downloadFile, fingerprint, warnings };
 }
 async function hashFile(filePath: string): Promise<string> {
   const hash = crypto.createHash('sha256');
