@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 contextBridge.exposeInMainWorld('etsyApp', {
   selectFolder: () => ipcRenderer.invoke('folder:select'),
+  selectFolders: () => ipcRenderer.invoke('folder:select-many'),
   scanFolder: (path: string) => ipcRenderer.invoke('folder:scan', path),
   readBase64: (path: string) => ipcRenderer.invoke('file:read-base64', path),
   generateListing: (payload: unknown) => ipcRenderer.invoke('ai:generate', payload),
