@@ -107,7 +107,7 @@ async function scanFolder(folderPath: string) {
       const info = await fs.stat(fullPath);
       const mimeType = mimeFromPath(fullPath);
       const isImage = ['.png','.jpg','.jpeg','.webp','.gif'].includes(ext);
-      const previewUrl = isImage && info.size <= 5 * 1024 * 1024 ? `data:${mimeType};base64,${(await fs.readFile(fullPath)).toString('base64')}` : '';
+      const previewUrl = isImage && info.size <= 20 * 1024 * 1024 ? `data:${mimeType};base64,${(await fs.readFile(fullPath)).toString('base64')}` : '';
       files.push({ name: entry.name, path: fullPath, size: info.size, mimeType, kind: isImage ? 'image' : 'download', previewUrl, relativePath: path.relative(folderPath, fullPath) });
     }
   }
