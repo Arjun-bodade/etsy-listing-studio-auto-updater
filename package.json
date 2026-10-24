@@ -59,8 +59,8 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "YOUR_GITHUB_USERNAME",
-        "repo": "etsy-listing-automation"
+        "owner": "Arjun-bodade",
+        "repo": "etsy-listing-studio-auto-updater"
       }
     ]
   }
