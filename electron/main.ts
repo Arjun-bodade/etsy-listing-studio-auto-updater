@@ -114,14 +114,26 @@ async function scanFolder(folderPath: string) {
   await walk(folderPath);
   files.sort((a,b) => a.path.localeCompare(b.path, undefined, { numeric: true }));
   const images = files.filter(f => f.kind === 'image');
-  // Strongly prefer explicitly named PNG artwork; otherwise choose the largest PNG
-  // as a practical default. The user can always override the suggestion in review.
   const pngs = images.filter(f => /\.png$/i.test(f.name));
-  const preferred = /^(master|main|design|artwork|original|print|printable|final)([-_ ]?\d+)?\.png$/i;
-  const main = pngs.find(f => preferred.test(f.name))
-    || pngs.sort((a,b) => b.size - a.size)[0]
-    || images.find(f => /(^|[/\\])(mockups?|listing images?)([/\\])/i.test(f.path.replace(folderPath,'')))
-    || images[0];
+  const explicitMaster = /^(master|main|design|artwork|original|print|printable|final|01|1)([-_ ]?\d+)?\.png$/i;
+  const mockupClue = /(mock.?up|listing.?image|thumbnail|thumb|preview|lifestyle|model|shirt|tshirt|hoodie|sweatshirt|flat.?lay|scene|photo|product.?shot|rank.?\d+)/i;
+  function candidateScore(file: typeof images[number]) {
+    const lower = file.path.toLowerCase();
+    const base = path.basename(file.name).toLowerCase();
+    let score = 0;
+    if (/\.png$/i.test(file.name)) score += 25;
+    if (explicitMaster.test(file.name)) score += 45;
+    if (/(master|original|source|design|artwork|printable|print-file|transparent)/i.test(base)) score += 24;
+    if (/(mockups?|listing images?|previews?|lifestyle|model photos?)/i.test(lower.replace(folderPath.toLowerCase(),''))) score -= 65;
+    if (mockupClue.test(base) && !/(design|artwork|original|master)/i.test(base)) score -= 30;
+    // Larger PNGs often contain the source artwork, but file size is only a weak clue.
+    score += Math.min(file.size / (1024 * 1024), 20) * 0.6;
+    if (file.previewUrl) score += 2;
+    return score;
+  }
+  const rankedCandidates = [...images].sort((a,b) => candidateScore(b)-candidateScore(a));
+  const main = rankedCandidates[0] || null;
+  const confidenceGap = rankedCandidates.length > 1 ? candidateScore(rankedCandidates[0]) - candidateScore(rankedCandidates[1]) : 100;
   const mockups = images.filter(f => f.path !== main?.path);
   // A listing image is not automatically the buyer's digital download. Only
   // offer non-image delivery files as automatic candidates.
@@ -136,7 +148,7 @@ async function scanFolder(folderPath: string) {
   }
   const fingerprint = fingerprintHash.digest('hex');
   const warnings = [
-    !main ? 'No PNG or image found. Choose a master image manually.' : (!preferred.test(main.name) ? 'Master PNG is an automatic suggestion. Review the preview and confirm or change it.' : ''),
+    !main ? 'No PNG or image found. Choose a master image manually.' : (confidenceGap < 15 ? 'Several images look like possible master artwork. Review the candidates and confirm the correct Master PNG.' : 'Master PNG selected by image and filename clues. Review the preview and change it if needed.'),
     mockups.length > 20 ? `Found ${mockups.length} additional images. Etsy supports up to 20 listing images; only the first 20 will be used.` : '',
     !downloadFile ? 'No clear PDF/ZIP digital download was identified. Confirm the buyer download separately before creating a draft.' : '',
     downloadFile && downloadFile.size > 20*1024*1024 ? 'The selected download exceeds Etsy’s 20 MB per-file limit for instant downloads.' : ''
