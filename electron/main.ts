@@ -39,6 +39,12 @@ function registerIpc() {
     if (result.canceled || !result.filePaths[0]) return null;
     return scanFolder(result.filePaths[0]);
   });
+  ipcMain.handle('folder:select-many', async () => {
+    const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'multiSelections'] });
+    if (result.canceled || !result.filePaths.length) return [];
+    const products = await Promise.all(result.filePaths.map(folder => scanFolder(folder)));
+    return products;
+  });
   ipcMain.handle('folder:scan', async (_e, folderPath: string) => scanFolder(folderPath));
   ipcMain.handle('file:read-base64', async (_e, filePath: string) => {
     const buffer = await fs.readFile(filePath);
@@ -97,7 +103,14 @@ async function scanFolder(folderPath: string) {
     files.push({ name: entry.name, path: fullPath, size: info.size, mimeType, kind: isImage ? 'image' : 'download', previewUrl });
   }
   files.sort((a,b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  const main = files.find(f => /^main\.(png|jpg|jpeg|webp)$/i.test(f.name)) || files.find(f => /\.(png|jpg|jpeg|webp)$/i.test(f.name));
+  const imageFiles = files.filter(f => f.kind === 'image');
+  const preferredNames = /^(master|main|design|artwork|original|print|printable|final)([-_ ]?\d+)?\.(png|jpg|jpeg|webp)$/i;
+  const main = imageFiles.find(f => preferredNames.test(f.name))
+    || imageFiles.filter(f => /\.png$/i.test(f.name)).sort((a,b) => {
+      const score = (f: typeof a) => (/(master|main|design|artwork|original|print|printable|final)/i.test(f.name) ? 100 : 0) + (f.previewUrl ? 10 : 0) - Math.min(f.size / (1024 * 1024), 20);
+      return score(b) - score(a);
+    })[0]
+    || imageFiles[0];
   const images = files.filter(f => f.kind === 'image');
   const mockups = images.filter(f => f.path !== main?.path);
   const downloadFile = main;
