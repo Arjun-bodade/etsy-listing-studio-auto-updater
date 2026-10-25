@@ -34,6 +34,7 @@
   "build": {
     "appId": "com.local.etsylistingautomation",
     "productName": "Etsy Listing Studio",
+    "protocols": [{ "name": "Etsy Listing Studio OAuth", "schemes": ["etsylistingstudio"] }],
     "directories": {
       "output": "release"
     },
