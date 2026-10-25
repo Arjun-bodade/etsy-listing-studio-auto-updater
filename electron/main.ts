@@ -3,38 +3,19 @@ import { autoUpdater } from 'electron-updater';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
-import { startEtsyAuth, handleEtsyOAuthCallback, getEtsyStatus, saveEtsySettings, getEtsySettings, createEtsyDraft } from './services/etsy';
+import { startEtsyAuth, getEtsyStatus, saveEtsySettings, getEtsySettings, createEtsyDraft } from './services/etsy';
 import { generateListing } from './services/ai';
 import { saveRecord, listRecords, updateRecord } from './services/store';
 
 const isDev = !app.isPackaged;
 let mainWindow: BrowserWindow | null = null;
-app.setAsDefaultProtocolClient('etsylistingstudio');
-async function handleOAuthDeepLink(rawUrl: string) {
-  if (!rawUrl.startsWith('etsylistingstudio://')) return;
-  try {
-    await handleEtsyOAuthCallback(rawUrl);
-    mainWindow?.webContents.send('etsy:oauth-result', { success: true, message: 'Etsy shop connected successfully.' });
-  } catch (error: any) {
-    mainWindow?.webContents.send('etsy:oauth-result', { success: false, message: error?.message || 'Etsy authorization failed.' });
-  }
-  if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); }
-}
-if (process.platform === 'darwin') app.on('open-url', (event, url) => { event.preventDefault(); void handleOAuthDeepLink(url); });
-app.on('second-instance', (_event, commandLine) => {
-  const deepLink = commandLine.find(arg => arg.startsWith('etsylistingstudio://'));
-  if (deepLink) void handleOAuthDeepLink(deepLink);
-  if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); }
-});
 function createWindow() {
   mainWindow = new BrowserWindow({ width: 1440, height: 940, minWidth: 1080, minHeight: 720, backgroundColor: '#101114', title: 'Etsy Listing Studio', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
   if (isDev) mainWindow.loadURL('http://127.0.0.1:5173'); else mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
 }
 app.whenReady().then(() => {
-  const startupDeepLink = process.argv.find(arg => arg.startsWith('etsylistingstudio://'));
   registerIpc();
   createWindow();
-  if (startupDeepLink) void handleOAuthDeepLink(startupDeepLink);
   if (app.isPackaged) {
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = true;
