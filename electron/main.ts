@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
 import { startEtsyAuth, handleEtsyOAuthCallback, getEtsyStatus, saveEtsySettings, getEtsySettings, createEtsyDraft } from './services/etsy';
 import { generateListing } from './services/ai';
+import { saveGeminiAPIKey, clearGeminiAPIKey, getAISettingsStatus } from './services/ai-settings';
 import { saveRecord, listRecords, updateRecord } from './services/store';
 
 const isDev = !app.isPackaged;
@@ -73,6 +74,19 @@ function registerIpc() {
     return { base64: buffer.toString('base64'), mimeType: mimeFromPath(filePath) };
   });
   ipcMain.handle('ai:generate', async (_e, payload) => generateListing(payload));
+  ipcMain.handle('ai:settings-status', async () => getAISettingsStatus());
+  ipcMain.handle('ai:save-key', async (_e, apiKey: string) => saveGeminiAPIKey(apiKey));
+  ipcMain.handle('ai:clear-key', async () => clearGeminiAPIKey());
+  ipcMain.handle('ai:test-key', async (_e, apiKey: string) => {
+    const key = String(apiKey || '').trim();
+    if (!key) throw new Error('Paste your Gemini API key first.');
+    const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models?key=' + encodeURIComponent(key));
+    const body: any = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body?.error?.message || 'Gemini API key test failed (' + response.status + ').');
+    const models = (body.models || []).filter((m: any) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'));
+    if (!models.length) throw new Error('The key works, but Google returned no models supporting generateContent for this project.');
+    return { valid: true, models: models.map((m: any) => String(m.name || '').replace(/^models\\//, '')).filter(Boolean) };
+  });
   ipcMain.handle('etsy:status', async () => getEtsyStatus());
   ipcMain.handle('etsy:connect', async (_e, apiKey: string, sharedSecret: string) => { await saveEtsySettings({ apiKey, sharedSecret }); return startEtsyAuth(); });
   ipcMain.handle('etsy:settings', async () => { const s = await getEtsySettings(); return { configured: Boolean(s.apiKey && s.sharedSecret), connected: Boolean(s.accessToken) }; });
