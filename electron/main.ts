@@ -85,7 +85,7 @@ function registerIpc() {
     if (!response.ok) throw new Error(body?.error?.message || 'Gemini API key test failed (' + response.status + ').');
     const models = (body.models || []).filter((m: any) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'));
     if (!models.length) throw new Error('The key works, but Google returned no models supporting generateContent for this project.');
-    return { valid: true, models: models.map((m: any) => String(m.name || '').replace(/^models\\//, '')).filter(Boolean) };
+    return { valid: true, models: models.map((m: any) => String(m.name || '').replace(/^models\//, '')).filter(Boolean) };
   });
   ipcMain.handle('etsy:status', async () => getEtsyStatus());
   ipcMain.handle('etsy:connect', async (_e, apiKey: string, sharedSecret: string) => { await saveEtsySettings({ apiKey, sharedSecret }); return startEtsyAuth(); });
