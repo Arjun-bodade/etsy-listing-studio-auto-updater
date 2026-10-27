@@ -3,19 +3,42 @@ import { autoUpdater } from 'electron-updater';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
-import { startEtsyAuth, getEtsyStatus, saveEtsySettings, getEtsySettings, createEtsyDraft } from './services/etsy';
+import { startEtsyAuth, handleEtsyOAuthCallback, getEtsyStatus, saveEtsySettings, getEtsySettings, createEtsyDraft } from './services/etsy';
 import { generateListing } from './services/ai';
+import { saveGeminiAPIKey, clearGeminiAPIKey, getAISettingsStatus } from './services/ai-settings';
 import { saveRecord, listRecords, updateRecord } from './services/store';
 
 const isDev = !app.isPackaged;
 let mainWindow: BrowserWindow | null = null;
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) app.quit();
+app.setAsDefaultProtocolClient('etsylistingstudio');
+async function handleOAuthDeepLink(rawUrl: string) {
+  if (!rawUrl.startsWith('etsylistingstudio://')) return;
+  try {
+    await handleEtsyOAuthCallback(rawUrl);
+    mainWindow?.webContents.send('etsy:oauth-result', { success: true, message: 'Etsy shop connected successfully.' });
+  } catch (error: any) {
+    mainWindow?.webContents.send('etsy:oauth-result', { success: false, message: error?.message || 'Etsy authorization failed.' });
+  }
+  if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); }
+}
+if (process.platform === 'darwin') app.on('open-url', (event, url) => { event.preventDefault(); void handleOAuthDeepLink(url); });
+app.on('second-instance', (_event, commandLine) => {
+  const deepLink = commandLine.find(arg => arg.startsWith('etsylistingstudio://'));
+  if (deepLink) void handleOAuthDeepLink(deepLink);
+  if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); }
+});
 function createWindow() {
   mainWindow = new BrowserWindow({ width: 1440, height: 940, minWidth: 1080, minHeight: 720, backgroundColor: '#101114', title: 'Etsy Listing Studio', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
   if (isDev) mainWindow.loadURL('http://127.0.0.1:5173'); else mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
 }
 app.whenReady().then(() => {
+  if (!gotSingleInstanceLock) return;
+  const startupDeepLink = process.argv.find(arg => arg.startsWith('etsylistingstudio://'));
   registerIpc();
   createWindow();
+  if (startupDeepLink) void handleOAuthDeepLink(startupDeepLink);
   if (app.isPackaged) {
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = true;
@@ -39,12 +62,31 @@ function registerIpc() {
     if (result.canceled || !result.filePaths[0]) return null;
     return scanFolder(result.filePaths[0]);
   });
+  ipcMain.handle('folder:select-many', async () => {
+    const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'multiSelections'] });
+    if (result.canceled || !result.filePaths.length) return [];
+    const products = await Promise.all(result.filePaths.map(folder => scanFolder(folder)));
+    return products;
+  });
   ipcMain.handle('folder:scan', async (_e, folderPath: string) => scanFolder(folderPath));
   ipcMain.handle('file:read-base64', async (_e, filePath: string) => {
     const buffer = await fs.readFile(filePath);
     return { base64: buffer.toString('base64'), mimeType: mimeFromPath(filePath) };
   });
   ipcMain.handle('ai:generate', async (_e, payload) => generateListing(payload));
+  ipcMain.handle('ai:settings-status', async () => getAISettingsStatus());
+  ipcMain.handle('ai:save-key', async (_e, apiKey: string) => saveGeminiAPIKey(apiKey));
+  ipcMain.handle('ai:clear-key', async () => clearGeminiAPIKey());
+  ipcMain.handle('ai:test-key', async (_e, apiKey: string) => {
+    const key = String(apiKey || '').trim();
+    if (!key) throw new Error('Paste your Gemini API key first.');
+    const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models?key=' + encodeURIComponent(key));
+    const body: any = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body?.error?.message || 'Gemini API key test failed (' + response.status + ').');
+    const models = (body.models || []).filter((m: any) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'));
+    if (!models.length) throw new Error('The key works, but Google returned no models supporting generateContent for this project.');
+    return { valid: true, models: models.map((m: any) => String(m.name || '').replace(/^models\//, '')).filter(Boolean) };
+  });
   ipcMain.handle('etsy:status', async () => getEtsyStatus());
   ipcMain.handle('etsy:connect', async (_e, apiKey: string, sharedSecret: string) => { await saveEtsySettings({ apiKey, sharedSecret }); return startEtsyAuth(); });
   ipcMain.handle('etsy:settings', async () => { const s = await getEtsySettings(); return { configured: Boolean(s.apiKey && s.sharedSecret), connected: Boolean(s.accessToken) }; });
@@ -84,32 +126,70 @@ function registerIpc() {
 }
 
 async function scanFolder(folderPath: string) {
-  const stat = await fs.stat(folderPath); if (!stat.isDirectory()) throw new Error('Select a folder, not a file.');
-  const names = await fs.readdir(folderPath, { withFileTypes: true });
-  const files = [] as Array<{name:string; path:string; size:number; mimeType:string; kind:string; previewUrl:string}>;
-  for (const entry of names) {
-    if (!entry.isFile()) continue;
-    const fullPath = path.join(folderPath, entry.name); const ext = path.extname(entry.name).toLowerCase();
-    if (!['.png','.jpg','.jpeg','.webp','.gif','.pdf','.zip','.svg'].includes(ext)) continue;
-    const info = await fs.stat(fullPath); const mimeType = mimeFromPath(fullPath);
-    const isImage = ['.png','.jpg','.jpeg','.webp','.gif'].includes(ext);
-    const previewUrl = isImage && info.size <= 5 * 1024 * 1024 ? `data:${mimeType};base64,${(await fs.readFile(fullPath)).toString('base64')}` : '';
-    files.push({ name: entry.name, path: fullPath, size: info.size, mimeType, kind: isImage ? 'image' : 'download', previewUrl });
+  const stat = await fs.stat(folderPath);
+  if (!stat.isDirectory()) throw new Error('Select a folder, not a file.');
+  const supported = new Set(['.png','.jpg','.jpeg','.webp','.gif','.pdf','.zip','.svg']);
+  const files: Array<{name:string; path:string; size:number; mimeType:string; kind:string; previewUrl:string; relativePath?:string}> = [];
+  async function walk(dir: string) {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      // Skip hidden/system folders and dependency/build folders.
+      if (entry.name.startsWith('.') || ['node_modules','dist','release','__MACOSX'].includes(entry.name)) continue;
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) { await walk(fullPath); continue; }
+      if (!entry.isFile()) continue;
+      const ext = path.extname(entry.name).toLowerCase();
+      if (!supported.has(ext)) continue;
+      const info = await fs.stat(fullPath);
+      const mimeType = mimeFromPath(fullPath);
+      const isImage = ['.png','.jpg','.jpeg','.webp','.gif'].includes(ext);
+      const previewUrl = isImage && info.size <= 20 * 1024 * 1024 ? `data:${mimeType};base64,${(await fs.readFile(fullPath)).toString('base64')}` : '';
+      files.push({ name: entry.name, path: fullPath, size: info.size, mimeType, kind: isImage ? 'image' : 'download', previewUrl, relativePath: path.relative(folderPath, fullPath) });
+    }
   }
-  files.sort((a,b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  const main = files.find(f => /^main\.(png|jpg|jpeg|webp)$/i.test(f.name)) || files.find(f => /\.(png|jpg|jpeg|webp)$/i.test(f.name));
+  await walk(folderPath);
+  files.sort((a,b) => a.path.localeCompare(b.path, undefined, { numeric: true }));
   const images = files.filter(f => f.kind === 'image');
+  const pngs = images.filter(f => /\.png$/i.test(f.name));
+  const explicitMaster = /^(master|main|design|artwork|original|print|printable|final|01|1)([-_ ]?\d+)?\.png$/i;
+  const mockupClue = /(mock.?up|listing.?image|thumbnail|thumb|preview|lifestyle|model|shirt|tshirt|hoodie|sweatshirt|flat.?lay|scene|photo|product.?shot|rank.?\d+)/i;
+  function candidateScore(file: typeof images[number]) {
+    const lower = file.path.toLowerCase();
+    const base = path.basename(file.name).toLowerCase();
+    let score = 0;
+    if (/\.png$/i.test(file.name)) score += 25;
+    if (explicitMaster.test(file.name)) score += 45;
+    if (/(master|original|source|design|artwork|printable|print-file|transparent)/i.test(base)) score += 24;
+    if (/(mockups?|listing images?|previews?|lifestyle|model photos?)/i.test(lower.replace(folderPath.toLowerCase(),''))) score -= 65;
+    if (mockupClue.test(base) && !/(design|artwork|original|master)/i.test(base)) score -= 30;
+    // Larger PNGs often contain the source artwork, but file size is only a weak clue.
+    score += Math.min(file.size / (1024 * 1024), 20) * 0.6;
+    if (file.previewUrl) score += 2;
+    return score;
+  }
+  const rankedCandidates = [...images].sort((a,b) => candidateScore(b)-candidateScore(a));
+  const main = rankedCandidates[0] || null;
+  const confidenceGap = rankedCandidates.length > 1 ? candidateScore(rankedCandidates[0]) - candidateScore(rankedCandidates[1]) : 100;
   const mockups = images.filter(f => f.path !== main?.path);
-  const downloadFile = main;
+  // A listing image is not automatically the buyer's digital download. Only
+  // offer non-image delivery files as automatic candidates.
+  const downloadCandidates = files.filter(f => f.kind === 'download' && ['.zip','.pdf'].includes(path.extname(f.name).toLowerCase()));
+  const downloadFile = downloadCandidates.find(f => /download|digital|printable|deliver|bundle|files/i.test(f.name)) || (downloadCandidates.length === 1 ? downloadCandidates[0] : null);
   const fingerprintHash = crypto.createHash('sha256');
   for (const file of files) {
-    fingerprintHash.update(file.name);
+    fingerprintHash.update(file.path.replace(folderPath,''));
     fingerprintHash.update(':');
     fingerprintHash.update(await hashFile(file.path));
     fingerprintHash.update('|');
   }
   const fingerprint = fingerprintHash.digest('hex');
-  return { folderPath, folderName: path.basename(folderPath), files, mainImage: main || null, mockups, downloadFile: downloadFile || null, fingerprint, warnings: [!main ? 'No PNG or image found. Choose a main image manually.' : '', mockups.length > 20 ? `Found ${mockups.length} mockups. Etsy supports up to 20 listing images; only the first 20 will be used.` : '', !downloadFile ? 'No digital download file found.' : '', downloadFile && downloadFile.size > 20*1024*1024 ? 'The main file exceeds Etsy’s 20 MB per-file limit for instant downloads.' : ''].filter(Boolean) };
+  const warnings = [
+    !main ? 'No PNG or image found. Choose a master image manually.' : (confidenceGap < 15 ? 'Several images look like possible master artwork. Review the candidates and confirm the correct Master PNG.' : 'Master PNG selected by image and filename clues. Review the preview and change it if needed.'),
+    mockups.length > 20 ? `Found ${mockups.length} additional images. Etsy supports up to 20 listing images; only the first 20 will be used.` : '',
+    !downloadFile ? 'No clear PDF/ZIP digital download was identified. Confirm the buyer download separately before creating a draft.' : '',
+    downloadFile && downloadFile.size > 20*1024*1024 ? 'The selected download exceeds Etsy’s 20 MB per-file limit for instant downloads.' : ''
+  ].filter(Boolean);
+  return { folderPath, folderName: path.basename(folderPath), files, mainImage: main || null, mockups, downloadFile, fingerprint, warnings };
 }
 async function hashFile(filePath: string): Promise<string> {
   const hash = crypto.createHash('sha256');

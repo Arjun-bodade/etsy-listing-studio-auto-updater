@@ -1,9 +1,14 @@
 import { contextBridge, ipcRenderer } from 'electron';
 contextBridge.exposeInMainWorld('etsyApp', {
   selectFolder: () => ipcRenderer.invoke('folder:select'),
+  selectFolders: () => ipcRenderer.invoke('folder:select-many'),
   scanFolder: (path: string) => ipcRenderer.invoke('folder:scan', path),
   readBase64: (path: string) => ipcRenderer.invoke('file:read-base64', path),
   generateListing: (payload: unknown) => ipcRenderer.invoke('ai:generate', payload),
+  getAISettingsStatus: () => ipcRenderer.invoke('ai:settings-status'),
+  saveGeminiAPIKey: (apiKey: string) => ipcRenderer.invoke('ai:save-key', apiKey),
+  clearGeminiAPIKey: () => ipcRenderer.invoke('ai:clear-key'),
+  testGeminiAPIKey: (apiKey: string) => ipcRenderer.invoke('ai:test-key', apiKey),
   getEtsyStatus: () => ipcRenderer.invoke('etsy:status'),
   connectEtsy: (apiKey: string, sharedSecret: string) => ipcRenderer.invoke('etsy:connect', apiKey, sharedSecret),
   getEtsySettings: () => ipcRenderer.invoke('etsy:settings'),

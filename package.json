@@ -1,6 +1,6 @@
 {
   "name": "etsy-listing-automation",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "description": "Local-first Etsy digital listing assistant for Windows",
   "main": "dist-electron/main.js",
@@ -34,6 +34,7 @@
   "build": {
     "appId": "com.local.etsylistingautomation",
     "productName": "Etsy Listing Studio",
+    "protocols": [{ "name": "Etsy Listing Studio OAuth", "schemes": ["etsylistingstudio"] }],
     "directories": {
       "output": "release"
     },
