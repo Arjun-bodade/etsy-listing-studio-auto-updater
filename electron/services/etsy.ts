@@ -2,31 +2,55 @@ import { app, shell, safeStorage } from 'electron';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import http from 'node:http';
 import { URL } from 'node:url';
 let settingsCache: any = null;
 const settingsPath = () => path.join(app.getPath('userData'), 'etsy-settings.json');
 export async function getEtsySettings(): Promise<any> { if (settingsCache) return settingsCache; try { const raw = await fs.readFile(settingsPath()); if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable.'); const decrypted = safeStorage.decryptString(raw); settingsCache = JSON.parse(decrypted); } catch { settingsCache = {}; } return settingsCache; }
 export async function saveEtsySettings(patch: any) { const settings = { ...(await getEtsySettings()), ...patch }; if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure credential encryption is unavailable. Please use a supported Windows desktop session.'); settingsCache = settings; await fs.mkdir(path.dirname(settingsPath()), { recursive: true }); const encrypted = safeStorage.encryptString(JSON.stringify(settings)); await fs.writeFile(settingsPath(), encrypted, { mode: 0o600 }); }
 export async function getEtsyStatus() { const s = await getEtsySettings(); return { configured: Boolean(s.apiKey && s.sharedSecret), connected: Boolean(s.accessToken), shopId: s.shopId || null }; }
+let pendingOAuth: { verifier: string; state: string } | null = null;
+const ETSY_REDIRECT_URI = 'https://arjun-portfolio-chi-sooty.vercel.app/api/etsy/callback';
+
 export async function startEtsyAuth() {
-  const s = await getEtsySettings(); if (!s.apiKey || !s.sharedSecret) throw new Error('Enter your Etsy API key and shared secret first.');
-  const verifier = crypto.randomBytes(32).toString('base64url'); const challenge = crypto.createHash('sha256').update(verifier).digest('base64url'); const state = crypto.randomBytes(20).toString('hex');
-  const server = http.createServer(async (req, res) => {
-    try {
-      const url = new URL(req.url || '/', 'http://127.0.0.1:42817');
-      if (url.pathname !== '/callback') { res.writeHead(404); res.end('Not found'); return; }
-      if (url.searchParams.get('state') !== state) { res.writeHead(400); res.end('OAuth state mismatch. You can close this window.'); server.close(); return; }
-      const code = url.searchParams.get('code'); if (!code) { res.writeHead(400); res.end('No authorization code returned.'); server.close(); return; }
-      const tokenResponse = await fetch('https://api.etsy.com/v3/public/oauth/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', client_id: s.apiKey, redirect_uri: 'http://127.0.0.1:42817/callback', code, code_verifier: verifier }) });
-      const tokenData: any = await tokenResponse.json(); if (!tokenResponse.ok) throw new Error(tokenData.error_description || tokenData.error || 'Etsy token exchange failed');
-      await saveEtsySettings({ accessToken: tokenData.access_token, refreshToken: tokenData.refresh_token, expiresAt: Date.now() + tokenData.expires_in * 1000 });
-      res.writeHead(200, { 'Content-Type': 'text/html' }); res.end('<h2>Etsy connected.</h2><p>You can return to Etsy Listing Studio.</p>'); server.close();
-    } catch (e: any) { res.writeHead(500); res.end(`Connection failed: ${String(e.message || e)}`); server.close(); }
-  });
-  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(42817, '127.0.0.1', resolve); });
-  const authUrl = new URL('https://www.etsy.com/oauth/connect'); authUrl.searchParams.set('response_type', 'code'); authUrl.searchParams.set('client_id', s.apiKey); authUrl.searchParams.set('redirect_uri', 'http://127.0.0.1:42817/callback'); authUrl.searchParams.set('scope', 'listings_w'); authUrl.searchParams.set('state', state); authUrl.searchParams.set('code_challenge', challenge); authUrl.searchParams.set('code_challenge_method', 'S256');
-  await shell.openExternal(authUrl.toString()); return { started: true };
+  const s = await getEtsySettings();
+  if (!s.apiKey || !s.sharedSecret) throw new Error('Enter your Etsy API key and shared secret first.');
+  const verifier = crypto.randomBytes(32).toString('base64url');
+  const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+  const state = crypto.randomBytes(20).toString('hex');
+  pendingOAuth = { verifier, state };
+  const authUrl = new URL('https://www.etsy.com/oauth/connect');
+  authUrl.searchParams.set('response_type', 'code');
+  authUrl.searchParams.set('client_id', s.apiKey);
+  authUrl.searchParams.set('redirect_uri', ETSY_REDIRECT_URI);
+  authUrl.searchParams.set('scope', 'listings_w');
+  authUrl.searchParams.set('state', state);
+  authUrl.searchParams.set('code_challenge', challenge);
+  authUrl.searchParams.set('code_challenge_method', 'S256');
+  try { await shell.openExternal(authUrl.toString()); return { started: true }; }
+  catch (error) { pendingOAuth = null; throw error; }
+}
+
+export async function handleEtsyOAuthCallback(callbackUrl: string) {
+  const callback = new URL(callbackUrl);
+  if (callback.protocol !== 'etsylistingstudio:' || callback.hostname !== 'oauth' || callback.pathname !== '/callback') throw new Error('Invalid Etsy Listing Studio callback.');
+  const pending = pendingOAuth;
+  if (!pending) throw new Error('No Etsy authorization is pending. Click Connect Etsy shop and try again.');
+  if (callback.searchParams.get('state') !== pending.state) { pendingOAuth = null; throw new Error('Etsy authorization state did not match. Please reconnect.'); }
+  const oauthError = callback.searchParams.get('error');
+  if (oauthError) { pendingOAuth = null; throw new Error(callback.searchParams.get('error_description') || ('Etsy authorization failed: ' + oauthError)); }
+  const code = callback.searchParams.get('code');
+  if (!code) throw new Error('Etsy did not return an authorization code.');
+  const s = await getEtsySettings();
+  try {
+    const response = await fetch('https://api.etsy.com/v3/public/oauth/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'authorization_code', client_id: s.apiKey, redirect_uri: ETSY_REDIRECT_URI, code, code_verifier: pending.verifier })
+    });
+    const data: any = await response.json();
+    if (!response.ok) throw new Error(data.error_description || data.error || ('Etsy token exchange failed (' + response.status + ')'));
+    await saveEtsySettings({ accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: Date.now() + data.expires_in * 1000 });
+    return { connected: true };
+  } finally { pendingOAuth = null; }
 }
 async function etsyFetch(url: string, init: RequestInit = {}) {
   const s = await getEtsySettings(); if (!s.apiKey || !s.accessToken) throw new Error('Connect your Etsy shop in Settings before uploading.');
