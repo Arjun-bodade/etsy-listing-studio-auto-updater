@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { getGeminiSettings } from './ai-settings';
 
 const outputSchema = z.object({
   title: z.string().min(1).max(140),
@@ -11,12 +12,13 @@ const outputSchema = z.object({
 
 /** Uses Google's Gemini REST API directly; no OpenAI SDK or paid OpenAI API key required. */
 export async function generateListing(payload: { imageBase64: string; mimeType: string; productName?: string; notes?: string }) {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const savedSettings = await getGeminiSettings();
+  const apiKey = savedSettings.apiKey || process.env.GEMINI_API_KEY || '';
   if (!apiKey) {
-    throw new Error('Gemini is not configured. Set GEMINI_API_KEY in PowerShell, then restart the app. Get a key at https://aistudio.google.com/');
+    throw new Error('Gemini API key is missing. Open Settings → AI content generation and save your key.');
   }
 
-  const model = process.env.GEMINI_VISION_MODEL || 'gemini-3.8-flash';
+  const model = process.env.GEMINI_VISION_MODEL || savedSettings.model || 'gemini-2.5-flash';
   const prompt = `You create accurate Etsy digital-download listing drafts. Analyze the supplied main product image. Never invent dimensions, licensing rights, included files, editable features, printing details, or guarantees. Generate an appealing but accurate title (max 140 characters), useful buyer-focused description, exactly 30 distinct keyword/tag candidates each max 20 characters, and exactly 13 best tags each max 20 characters. Etsy supports only 13 tags. Avoid repeated tags and irrelevant keywords. Return only valid JSON with keys: title, description, keywordCandidates, selectedTags, suggestedCategory, altText.\n\nOptional product name: ${payload.productName || 'not provided'}. Seller notes: ${payload.notes || 'none'}. This is the main product PNG. Ensure exactly 30 candidates and 13 selected tags.`;
 
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
